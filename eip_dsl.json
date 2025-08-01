@@ -1,0 +1,221 @@
+{
+  "project": {
+    "name": "customerapi-project"
+  },
+  "globalConfigs": [
+    {
+      "type": "db-connection",
+      "name": "Database_Config",
+      "attributes": {
+        "url": "${database.url}",
+        "driverClassName": "${database.driver}",
+        "user": "${database.user}",
+        "password": "${database.password}"
+      }
+    },
+    {
+      "type": "stripe-connection",
+      "name": "Stripe_Connector_Config",
+      "attributes": {
+        "authorization": "${paymentsprocessor.authorizationkey}"
+      }
+    },
+    {
+      "type": "http-listener",
+      "name": "customer-api-httpListenerConfig",
+      "attributes": {
+        "host": "0.0.0.0",
+        "port": "8081"
+      }
+    },
+    {
+      "type": "amqp-connection",
+      "name": "AMQP_Config",
+      "attributes": {
+        "host": "${rabbitmq.host}",
+        "username": "${rabbitmq.user}",
+        "password": "${rabbitmq.password}",
+        "port": "${rabbitmq.port}",
+        "virtualHost": "${rabbitmq.virtualhost}"
+      }
+    }
+  ],
+  "apis": [
+    {
+      "name": "CustomerApiAPI",
+      "context": "/",
+      "resources": [
+        {
+          "methods": [
+            "POST"
+          ],
+          "uri-template": "/api/customers",
+          "inSequence": {
+            "steps": [
+              {
+                "type": "sequence",
+                "label": "Invoke PostCustomersApiLogic",
+                "attributes": {
+                  "key": "postCustomersApplicationJsonCustomerApiConfig"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "methods": [
+            "GET"
+          ],
+          "uri-template": "/console/*",
+          "inSequence": {
+            "steps": [
+              {
+                "type": "sequence",
+                "label": "Invoke CustomerApiConsole",
+                "attributes": {
+                  "key": "customerApiConsole"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "sequences": [
+    {
+      "name": "postCustomersApplicationJsonCustomerApiConfig",
+      "steps": [
+        {
+          "type": "log",
+          "label": "Logger",
+          "attributes": {
+            "message": "Message received: #[payload]"
+          }
+        },
+        {
+          "type": "set-variable",
+          "label": "Billing Address",
+          "attributes": {
+            "variableName": "isBillingAddress",
+            "value": "%dw 2.0\noutput text/plain\n---\ncontains(payload.deliveryAddresses.\"type\", \"BILLING\")"
+          }
+        },
+        {
+          "type": "filter",
+          "label": "Billing Address Present?",
+          "attributes": {
+            "expression": "#[vars.isBillingAddress]",
+            "message": "The customer record does not have a billing address"
+          }
+        },
+        {
+          "type": "amqp-publish",
+          "label": "Publish",
+          "attributes": {
+            "config-ref": "AMQP_Config",
+            "exchangeName": "${customercreate-queues.topic}"
+          }
+        },
+        {
+          "type": "transform",
+          "label": "Transform Message",
+          "attributes": {
+            "payload": "%dw 2.0\noutput application/json\n---\n{\n  identifier: uuid()\n}"
+          }
+        },
+        {
+          "type": "log",
+          "label": "Logger",
+          "attributes": {
+            "message": "Message processed: #[payload]"
+          }
+        }
+      ]
+    },
+    {
+      "name": "createCustomerDatabase",
+      "steps": [
+        {
+          "type": "log",
+          "label": "Logger",
+          "attributes": {
+            "message": "Consumer: CustomerCreateDatabase"
+          }
+        },
+        {
+          "type": "db-insert",
+          "label": "Insert",
+          "attributes": {
+            "config-ref": "Database_Config",
+            "sql": "INSERT INTO public.customers\n\t(firstName, lastname, email, phone, created_on)\nVALUES \n\t(:firstName, :lastName, :email, :phone, current_timestamp)",
+            "input-parameters": "#[{'firstName':payload.firstName,'lastName':payload.lastName,'email':payload.email,'phone':payload.phone}]"
+          }
+        }
+      ]
+    },
+    {
+      "name": "createCustomerPayment",
+      "steps": [
+        {
+          "type": "log",
+          "label": "Logger",
+          "attributes": {
+            "message": "Consumer: CustomerCreatePayment"
+          }
+        },
+        {
+          "type": "set-variable",
+          "label": "Set Stripe Payload",
+          "attributes": {
+            "variableName": "stripePayload",
+            "value": "%dw 2.0\noutput text/plain\n---\"description=\" ++ (payload.firstName\ndefault \"\") ++ \" \" ++ payload.lastName\n++ \"&\"\n++\n\"email=\" ++ payload.email\n++ \"&\"\n++\n\"phone=\" ++ payload.phone\n++ \"&\"\n++\n\"address[line1]=\" ++ payload.deliveryAddresses[1].address\n++ \"&\"\n++\n\"address[city]=\" ++ payload.deliveryAddresses[1].city\n++ \"&\"\n++\n\"address[postal_code]=\" ++ payload.deliveryAddresses[1].postalCode\n++ \"&\"\n++\n\"address[state]=\" ++ payload.deliveryAddresses[1].state\n++ \"&\"\n++\n\"address[country]=\" ++ payload.deliveryAddresses[1].country\n"
+          }
+        },
+        {
+          "type": "log",
+          "label": "Logger",
+          "attributes": {
+            "message": "Customer Stripe: #[vars.stripePayload]"
+          }
+        },
+        {
+          "type": "stripe-create-customer",
+          "label": "Create a customer",
+          "attributes": {
+            "config-ref": "Stripe_Connector_Config",
+            "create-customer-content": "#[vars.stripePayload]"
+          }
+        }
+      ]
+    },
+    {
+      "name": "customerApiMain",
+      "steps": []
+    },
+    {
+      "name": "customerApiConsole",
+      "steps": []
+    }
+  ],
+  "inboundEndpoints": [
+    {
+      "name": "CreateCustomerDatabaseAMQPListener",
+      "protocol": "amqp",
+      "sequence": "createCustomerDatabase",
+      "parameters": {
+        "queueName": "${customercreate-queues.database}",
+        "config-ref": "AMQP_Config"
+      }
+    },
+    {
+      "name": "CreateCustomerPaymentAMQPListener",
+      "protocol": "amqp",
+      "sequence": "createCustomerPayment",
+      "parameters": {
+        "queueName": "${customercreate-queues.payments}",
+        "config-ref": "AMQP_Config"
+      }
+    }
+  ]
+}
